@@ -19,6 +19,7 @@ def build(result: dict) -> dict:
         "declared_encoding": manifest["declared_encoding"],
         "params": manifest["params"],
         "thresholds": manifest["thresholds"],
+        "protection": manifest.get("protection"),
         "started_at": manifest["started_at"],
         "finished_at": manifest["finished_at"],
         "elapsed_ms": manifest["elapsed_ms"],

@@ -16,6 +16,7 @@ from .modules.m3_missing import handler as m3_handler
 from .modules.m4_duplicates import handler as m4_handler
 from .modules.m5_outliers import handler as m5_handler
 from .modules.m6_score import handler as m6_handler
+from .modules.m6_score import service as m6_service
 from .modules.m7_export import handler as m7_handler
 
 MODULES = (m1_handler, m2_handler, m3_handler, m4_handler, m5_handler,
@@ -39,6 +40,10 @@ def create_app(settings: config.Settings | None = None) -> FastAPI:
     for module in MODULES:
         app.include_router(module.router)
     errors.install_handlers(app)
+    # 保护政策与当前不一致的存量数据集，启动即按库存原文同步重算；
+    # 报告页与导出读同一条新快照，天然一起切换
+    app.state.protection_refreshed = m6_service.refresh_protection(
+        settings, app.state.store)
 
     def _head_ok() -> Response:
         return Response(status_code=200, media_type="text/html; charset=utf-8")

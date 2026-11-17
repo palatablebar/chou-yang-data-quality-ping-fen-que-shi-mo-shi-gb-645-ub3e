@@ -5,6 +5,8 @@ services:
     environment:
       QS_DB: /data/qualiscore.sqlite
       QS_SAMPLE_DIR: /app/sample_data
+      # 脱敏胡椒：共享部署必须换成随机长串并当密钥保管；换了就触发全量重算
+      QS_MASK_PEPPER: ${QS_MASK_PEPPER:-qualiscore-dev-pepper}
       TZ: Asia/Shanghai
     ports:
       - "18204:8000"

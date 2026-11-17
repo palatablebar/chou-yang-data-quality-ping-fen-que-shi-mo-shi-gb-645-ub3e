@@ -109,6 +109,8 @@ def quarantine_entry(record: Record, code: str, segment: int, detail: str) -> di
         "level": reasons.level(code),
         "field": "row",
         "raw_value": ",".join(record.cells)[:300],
+        # 单元格列表只在运行期存在：脱敏层按表头位置换牌后从快照里移除
+        "cells": list(record.cells),
         "detail": detail,
     }
 

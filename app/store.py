@@ -3,6 +3,9 @@
 约定：
 - 数据集按名字唯一：同名文件重新采信即覆盖原文，历史运行仍按 digest 保留；
 - 运行记录按 (dataset, digest, rules_version) 幂等：同输入重跑不新增行；
+- 数据集原文与运行记录在同一个事务里落库：处理中断就整体回滚，
+  页面与导出永远停在上一完整版本；
+- 版本号在写入事务内分配（同名 MAX+1），不与计算阶段脱节，不会叠加；
 - 分数与比率落 TEXT（Decimal 字符串），不落 float；
 - 页面永远只展示一条运行记录，导出读的是同一条快照。
 """
@@ -49,6 +52,14 @@ CREATE TABLE IF NOT EXISTS runs (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_runs_identity ON runs(name, digest, rules_version);
 CREATE INDEX IF NOT EXISTS idx_runs_version ON runs(name, version DESC);
 """
+
+
+class RunExists(Exception):
+    """同 (数据集, 输入摘要, 规则版本) 已在库中：重试必须复用而不是叠加。"""
+
+    def __init__(self, run_id: str):
+        super().__init__(f"运行记录已存在：{run_id}")
+        self.run_id = run_id
 
 
 def _dec(text):
@@ -117,7 +128,40 @@ class Store:
         return dict(row) if row else None
 
     def save_run(self, run: dict, summary: dict) -> None:
+        self.save_run_bundle(dataset=None, run=run, summary=summary)
+
+    def save_run_bundle(self, *, dataset: dict | None, run: dict,
+                        summary: dict) -> None:
+        """数据集原文与运行记录单事务落库；版本号在事务内分配。
+
+        任何一步失败（含中断）都整体回滚：库里只有完整版本。
+        同事务内先查幂等键，同批并发重试落为 RunExists，由调用方复用。
+        """
         with self.connect() as conn:
+            existing = conn.execute(
+                "SELECT run_id FROM runs WHERE name=? AND digest=? AND rules_version=?",
+                (run["name"], run["digest"], run["rules_version"])).fetchone()
+            if existing:
+                raise RunExists(existing["run_id"])
+            if dataset is not None:
+                conn.execute(
+                    """INSERT INTO datasets (name,digest,encoding,declared_encoding,bytes,
+                            content,updated_at) VALUES (?,?,?,?,?,?,?)
+                       ON CONFLICT(name) DO UPDATE SET
+                         digest=excluded.digest, encoding=excluded.encoding,
+                         declared_encoding=excluded.declared_encoding,
+                         bytes=excluded.bytes, content=excluded.content,
+                         updated_at=excluded.updated_at""",
+                    (dataset["name"], dataset["digest"], dataset["encoding"],
+                     dataset["declared_encoding"], len(dataset["data"]),
+                     dataset["data"], dataset["stamp"]))
+            version = int(conn.execute(
+                "SELECT COALESCE(MAX(version), 0) + 1 AS v FROM runs WHERE name=?",
+                (run["name"],)).fetchone()["v"])
+            run["version"] = version
+            summary["run"]["version"] = version
+            if isinstance(summary.get("manifest"), dict):
+                summary["manifest"]["version"] = version
             conn.execute(
                 """INSERT INTO runs (run_id,name,digest,rules_version,version,score,grade,
                         rows_in,rows_accepted,rows_unique,rows_dup,rows_quarantine,
@@ -125,7 +169,7 @@ class Store:
                         last_seen_at,seen_seq,summary_json)
                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (run["run_id"], run["name"], run["digest"], run["rules_version"],
-                 int(run["version"]), str(run["score"]), run["grade"],
+                 version, str(run["score"]), run["grade"],
                  int(run["rows_in"]), int(run["rows_accepted"]), int(run["rows_unique"]),
                  int(run["rows_dup"]), int(run["rows_quarantine"]),
                  int(run["rows_blank"]), int(run["cells_total"]),

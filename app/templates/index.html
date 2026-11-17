@@ -90,6 +90,19 @@
   </table>
 </section>
 
+{% if report.protection %}
+<section class="block">
+  <h2 class="block__title">共享面保护<span class="block__hint">{{ report.protection.policy }}</span></h2>
+  <ul class="pairs pairs--two">
+    <li class="pair"><span class="pair__key">受保护字段</span><span class="pair__value">{{ report.protection.column_labels|join("、") }}</span></li>
+    <li class="pair"><span class="pair__key">保护方式</span><span class="pair__value">{{ report.protection.token }}</span></li>
+    <li class="pair"><span class="pair__key">胡椒指纹</span><span class="pair__value num">{{ report.protection.pepper_id }}</span></li>
+    <li class="pair"><span class="pair__key">审计线索</span><span class="pair__value">{{ report.protection.kept }}</span></li>
+  </ul>
+  <p class="aside">受保护列的取值已换为确定性令牌：同值同牌，重复与冲突关系可复核；行号与原因码保留，可回查源文件。原始值不进共享快照。</p>
+</section>
+{% endif %}
+
 <section class="block">
   <h2 class="block__title">计数</h2>
   <ul class="pairs pairs--two">

@@ -8,6 +8,8 @@ from __future__ import annotations
 from ... import config
 from .hashdup import MISSING_TOKEN, canonical_cell
 
+EMPTY_KEY_LABEL = "空键"
+
 
 def business_key(profile: dict, row: dict) -> str:
     parts = []
@@ -83,4 +85,4 @@ def _conflict_values(rows: list[dict], columns: list[str]) -> list[dict]:
 
 
 def _clean_key(key: str) -> str:
-    return key.replace(MISSING_TOKEN, "空键").replace("\u0001", " / ")
+    return key.replace(MISSING_TOKEN, EMPTY_KEY_LABEL).replace("\u0001", " / ")

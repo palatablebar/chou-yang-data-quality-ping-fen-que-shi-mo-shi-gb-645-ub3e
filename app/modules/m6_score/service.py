@@ -1,7 +1,9 @@
 """M6 编排：一次运行把七个阶段串起来，落库为一条可复算的运行记录。
 
-顺序固定：采信 → 画像 → 缺失 → 重复 → 离群 → 评分 → 对账。
-同 (数据集名, 输入摘要, 规则版本) 命中已有记录时直接复用，不新增行。
+顺序固定：采信 → 画像 → 缺失 → 重复 → 离群 → 评分 → 对账 → 脱敏 → 落库。
+同 (数据集名, 输入摘要, 规则版本) 命中已有记录时直接复用，不新增行；
+输入摘要含保护政策，政策一变同输入也重算。落库是单事务：中断就整体
+回滚，页面与导出永远停在上一完整版本。
 """
 from __future__ import annotations
 
@@ -9,7 +11,7 @@ import datetime as dt
 import time
 from decimal import Decimal
 
-from ... import config, manifest
+from ... import config, manifest, protect, store as store_mod
 from ..m1_ingest import service as m1_service
 from ..m2_profile import service as m2_service
 from ..m3_missing import service as m3_service
@@ -30,12 +32,17 @@ def run(settings: config.Settings, store, *, name: str | None = None,
     ingest = m1_service.ingest(settings, name=name, data=data,
                                declared=declared, store=store)
     runstore.stale_check(store, ingest["name"], _int_or_none(expected_version))
-    existing = store.find_run(ingest["name"], ingest["digest"], settings.rule_version)
+    run_digest = manifest.input_digest(ingest["name"], ingest["raw"],
+                                       settings.rule_version, settings.mask_pepper)
+    dataset_row = {
+        "name": ingest["name"], "digest": ingest["digest"],
+        "encoding": ingest["encoding"],
+        "declared_encoding": ingest["declared_encoding"],
+        "data": ingest["raw"], "stamp": started_at,
+    }
+    existing = store.find_run(ingest["name"], run_digest, settings.rule_version)
     if existing is not None:
-        store.save_dataset(name=ingest["name"], digest=ingest["digest"],
-                          encoding=ingest["encoding"],
-                          declared_encoding=ingest["declared_encoding"],
-                          data=ingest["raw"], stamp=started_at)
+        store.save_dataset(**dataset_row)
         return runstore.replay(store, existing)
 
     steps = [("ingest", lambda: None)]
@@ -97,11 +104,10 @@ def run(settings: config.Settings, store, *, name: str | None = None,
         "tested_cells": counts["tested_cells"],
         "segments": ingest["segments"],
     }
-    version = store.latest_version(ingest["name"]) + 1
     run_id = manifest.new_run_id()
     finished_at = dt.datetime.now(config.UTC).isoformat(timespec="seconds")
     payload = manifest.build(
-        run_id=run_id, version=version, name=ingest["name"], digest=ingest["digest"],
+        run_id=run_id, version=None, name=ingest["name"], digest=run_digest,
         settings=settings, encoding=ingest["encoding"],
         declared_encoding=ingest["declared_encoding"],
         params={"delimiter": ingest["delimiter"], "segments": ingest["segments"],
@@ -113,8 +119,8 @@ def run(settings: config.Settings, store, *, name: str | None = None,
         thresholds=runstore.thresholds())
     result = {
         "run": {
-            "run_id": run_id, "name": ingest["name"], "digest": ingest["digest"],
-            "rules_version": settings.rule_version, "version": version,
+            "run_id": run_id, "name": ingest["name"], "digest": run_digest,
+            "rules_version": settings.rule_version, "version": None,
             "score": scored["score"], "grade": scored["grade"],
             "rows_in": ingest["counts"]["raw_records"],
             "rows_accepted": ingest["counts"]["accepted"],
@@ -149,12 +155,18 @@ def run(settings: config.Settings, store, *, name: str | None = None,
         "manifest": payload,
         "replay": False,
     }
-    result = _json_safe(result)
-    store.save_dataset(name=ingest["name"], digest=ingest["digest"],
-                      encoding=ingest["encoding"],
-                      declared_encoding=ingest["declared_encoding"],
-                      data=ingest["raw"], stamp=started_at)
-    runstore.persist(store, result)
+    # 脱敏是共享快照落库前的最后一步：受保护列取值在此换牌，
+    # 页面、API、导出读到的都是同一份脱敏结果。
+    result = _json_safe(protect.apply(result, settings.mask_pepper))
+    try:
+        runstore.persist(store, result, dataset=dataset_row)
+    except store_mod.RunExists as exists:
+        # 同批并发重试撞了幂等键：复用已落库的那条，不重复计分、不叠加版本
+        existing = store.get_run(exists.run_id)
+        if existing is None:
+            raise
+        store.save_dataset(**dataset_row)
+        return runstore.replay(store, existing)
     return result
 
 
@@ -242,6 +254,38 @@ def _json_safe(value):
 def latest(store, run_id: str | None = None) -> tuple[dict, dict]:
     run = runstore.require_run(store, run_id)
     return run, store.load_result(run["run_id"]) or {}
+
+
+def refresh_protection(settings: config.Settings, store) -> dict:
+    """启动时同步重算：保护政策与当前不一致的数据集，按库存原文重跑。
+
+    只比较保护政策（政策版本、保护列、胡椒指纹）；评分口径变化仍按
+    「改完重新运行」的手工契约，不在这里自动重算。重跑走正常的
+    run()：政策变了输入摘要就变，必然算出新版本；单个数据集重算失败
+    不拖垮启动——它的上一完整版本还在，留下失败名单待人工处理。
+    """
+    current = protect.policy_summary(settings.mask_pepper)
+    current_key = (current["policy"], tuple(current["columns"]),
+                   current["pepper_id"])
+    refreshed: list[str] = []
+    failed: list[str] = []
+    for dataset in store.list_datasets():
+        latest_run = store.latest_run(dataset["name"])
+        if latest_run is None:
+            continue
+        result = store.load_result(latest_run["run_id"]) or {}
+        protection = result.get("manifest", {}).get("protection") or {}
+        key = (protection.get("policy"), tuple(protection.get("columns", ())),
+               protection.get("pepper_id"))
+        if key == current_key:
+            continue
+        try:
+            run(settings, store, name=dataset["name"])
+        except Exception:  # noqa: BLE001 启动重算失败保留上一完整版本
+            failed.append(dataset["name"])
+        else:
+            refreshed.append(dataset["name"])
+    return {"refreshed": refreshed, "failed": failed}
 
 
 def summary(result: dict) -> dict:

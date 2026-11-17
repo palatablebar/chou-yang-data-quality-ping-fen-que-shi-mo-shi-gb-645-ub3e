@@ -25,6 +25,18 @@ SCORE_QUANT = Decimal("0.01")
 RATE_QUANT = Decimal("0.0001")
 HUNDRED = Decimal("100")
 
+# 共享面保护规则：受保护列的取值在运行快照里一律换成确定性令牌，
+# 政策本身参与规则摘要——改下列任何一项，同一份输入都必须重算。
+PROTECT_VERSION = "protect/1.0"
+PROTECTED_COLUMNS: tuple[str, ...] = ("ticket_id", "customer_id", "agent")
+PROTECT_TOKEN_HEX = 10
+PROTECT_PREFIX: dict[str, str] = {
+    "ticket_id": "工单", "customer_id": "客户", "agent": "客服",
+}
+# 仅本地开发的默认胡椒；共享部署必须用 QS_MASK_PEPPER 覆盖，
+# 否则任何拿到源码的人都能重放令牌。
+MASK_PEPPER_DEFAULT = "qualiscore-dev-pepper"
+
 # 稳健 z：0.6745 是正态分布四分位距与标准差的换算系数
 MAD_SCALE = Decimal("0.6745")
 IQR_SCALE = Decimal("1.349")
@@ -171,6 +183,7 @@ class Settings:
     db_path: str = field(default_factory=lambda: str(PROJECT_ROOT / "var" / "qualiscore.sqlite"))
     sample_dir: str = field(default_factory=lambda: str(PROJECT_ROOT / "sample_data"))
     rule_version: str = RULE_VERSION
+    mask_pepper: str = MASK_PEPPER_DEFAULT
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -178,6 +191,7 @@ class Settings:
         return cls(
             db_path=os.getenv("QS_DB") or base.db_path,
             sample_dir=os.getenv("QS_SAMPLE_DIR") or base.sample_dir,
+            mask_pepper=os.getenv("QS_MASK_PEPPER") or base.mask_pepper,
         )
 
     @property

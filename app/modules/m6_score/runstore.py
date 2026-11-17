@@ -2,6 +2,8 @@
 
 同名数据集每次内容变化就是一次新版本；客户端手里的版本比库里旧，
 说明它读到的是过期页面，直接 409，不允许旧页面把新结果覆盖掉。
+版本号在落库事务内分配（同名 MAX+1），不与计算阶段脱节；
+同批并发重试撞幂等键时由调用方落回复用，不重复计分、不叠加版本。
 """
 from __future__ import annotations
 
@@ -59,18 +61,19 @@ def _run_row(run: dict) -> dict:
     }
 
 
-def persist(store, result: dict) -> dict:
+def persist(store, result: dict, dataset: dict | None = None) -> dict:
+    """落库一条运行记录；版本号由存储层在事务内分配并回填到结果。"""
     run = result["run"]
-    store.save_run({
+    store.save_run_bundle(dataset=dataset, run={
         "run_id": run["run_id"], "name": run["name"], "digest": run["digest"],
-        "rules_version": run["rules_version"], "version": run["version"],
+        "rules_version": run["rules_version"], "version": run.get("version"),
         "score": Decimal(run["score"]), "grade": run["grade"],
         "rows_in": run["rows_in"], "rows_accepted": run["rows_accepted"],
         "rows_unique": run["rows_unique"], "rows_dup": run["rows_dup"],
         "rows_quarantine": run["rows_quarantine"], "rows_blank": run["rows_blank"],
         "cells_total": run["cells_total"], "cells_missing": run["cells_missing"],
         "created_at": run["created_at"], "finished_at": run["finished_at"],
-    }, result)
+    }, summary=result)
     return result
 
 

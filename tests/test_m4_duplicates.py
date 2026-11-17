@@ -3,8 +3,15 @@ from __future__ import annotations
 
 from decimal import Decimal
 
+from app import config, protect
 from app.modules.m4_duplicates import groups, hashdup, keydup
 from fixtures import dirty_cases, expected
+
+PEPPER = config.MASK_PEPPER_DEFAULT
+
+
+def ticket_token(raw: str) -> str:
+    return protect.token("ticket_id", raw, PEPPER)
 
 
 def test_exact_duplicate_group_detected(dirty_result):
@@ -17,22 +24,27 @@ def test_exact_duplicate_group_detected(dirty_result):
 
 
 def test_key_conflict_keeps_both_rows_and_fields(dirty_result):
-    """TRAP-14：同键不同值时两行都保留原值，冲突列逐列列出，不做后写覆盖。"""
+    """TRAP-14：同键不同值时两行都保留，冲突列逐列列出，不做后写覆盖；
+    共享快照里受保护列以令牌呈现，非保护列仍是原值。"""
     conflict = dirty_result["duplicates"]["conflicts"][0]
-    assert conflict["key"] == expected.DUPLICATE["conflict_key"]
+    assert conflict["key"] == ticket_token(expected.DUPLICATE["conflict_key"])
     assert conflict["linenos"] == expected.DUPLICATE["conflict_linenos"]
     assert conflict["fields"] == expected.DUPLICATE["conflict_fields"]
     values = {item["column"]: [entry["raw"] for entry in item["entries"]]
               for item in conflict["rows"]}
     assert values["satisfaction"] == ["4", "2"]
-    assert values["agent"] == ["王柯", "李迟"]
+    assert values["agent"] == [protect.token("agent", "王柯", PEPPER),
+                               protect.token("agent", "李迟", PEPPER)]
+    assert values["agent"][0] != values["agent"][1]  # 不同原值 → 不同令牌
+    assert "王柯" not in str(conflict) and "李迟" not in str(conflict)
 
 
 def test_same_key_same_values_is_repeat_not_conflict(dirty_result):
     repeats = {item["key"]: item for item in dirty_result["duplicates"]["key_repeats"]}
-    assert expected.DUPLICATE["key_repeat"] in repeats
-    assert repeats[expected.DUPLICATE["key_repeat"]]["linenos"] == [3, 35]
-    assert expected.DUPLICATE["key_repeat"] not in {
+    token = ticket_token(expected.DUPLICATE["key_repeat"])
+    assert token in repeats
+    assert repeats[token]["linenos"] == [3, 35]
+    assert token not in {
         item["key"] for item in dirty_result["duplicates"]["conflicts"]}
 
 
@@ -90,7 +102,7 @@ def test_hash_and_key_accounts_are_separate(dirty_result):
 def test_duplicates_api_route(client_with_run):
     body = client_with_run.get("/api/duplicates").json()
     assert body["duplicate_rows"] == expected.DIRTY["rows_dup"]
-    assert body["conflicts"][0]["key"] == expected.DUPLICATE["conflict_key"]
+    assert body["conflicts"][0]["key"] == ticket_token(expected.DUPLICATE["conflict_key"])
     assert body["identity_columns"] == ["ticket_id"]
 
 

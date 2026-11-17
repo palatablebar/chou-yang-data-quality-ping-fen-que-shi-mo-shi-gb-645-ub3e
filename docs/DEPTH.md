@@ -1,10 +1,13 @@
 # 深度登记 qualiscore（抽样数据质量评分与缺失模式）
 
-- 规模：中型（7 个功能模块 / 6 个应用页 / 97 条测试）
+- 规模：中型（7 个功能模块 / 6 个应用页 / 116 条测试）
 - 核心规则：**MAD 稳健 z + 退化回退 + 封顶加权评分**。逐格先判三态（缺失 / 格式不合格 / 有值），
   再按列算中位数与 MAD；`z = 0.6745 × (x − 中位数) / MAD`，MAD=0 时回退 `spread = 0.6745 × IQR / 1.349`，
   离散度低于「列刻度 × 5」或 MAD 与 IQR 同为 0 判退化；评分 = 100 − 缺失 30 − 重复 25 − 离群 20 − 格式 25，
   每维按容忍度封顶，比率与扣分全用 Decimal。
+- 共享面保护：工单号 / 客户号 / 受理人在运行快照落库前换确定性令牌（`app/protect.py`），
+  同值同牌、缺失不换牌；页面、API 与七种导出只读脱敏快照，原始值留在内部数据集存储；
+  保护政策参与输入摘要，改政策或换胡椒即触发重算。
 - 使用者与工作流：客服质量组每月抽 1.2 万行工单导出一份 CSV，原先靠人眼翻缺失、重复和离群；
   现在一次采信得到分数、等级、逐列证据与运行清单，每个数字能追回源文件行号与原因码。
 
@@ -38,6 +41,8 @@
 | TRAP-19 | 一个单元格同时像缺失、越界、离群 | 按代码顺序覆盖，分项之和大于总分 | 固定优先级缺失 > 格式不合格 > 离群，一格只进一个桶 | `app/modules/m5_outliers/flags.py`、`app/modules/m2_profile/formats.py` | `tests/test_m5_outliers.py::test_priority_missing_over_range_over_outlier` |
 | TRAP-22 | 同一组重复行打乱顺序 | 代表行随顺序变化，导出结果不可复现 | 代表行取最小原始行号，组排序按代表行号 | `app/modules/m4_duplicates/groups.py`、`app/modules/m4_duplicates/hashdup.py` | `tests/test_m4_duplicates.py::test_order_independence_of_groups` |
 | TRAP-26 | 旧页面提交覆盖新结果 | 后提交无条件写入，新版本被旧数据顶掉 | 同名数据集版本自增，`expected_version` 落后即 409 | `app/modules/m6_score/runstore.py` | `tests/test_m6_score.py::test_stale_submission_rejected`、`tests/test_e2e.py::test_stale_version_conflict_over_http` |
+| TRAP-30 | 共享报告带工单号、客户号、客服姓名 | 直接标识符随导出外流；整列擦除又让缺失模式无法复核 | 快照落库前确定性换牌（HMAC 带钥、同值同牌、缺失不换牌），行号与原因码全保留；保护政策进输入摘要，改政策即重算 | `app/protect.py`、`app/modules/m6_score/service.py` | `tests/test_protect.py::test_shared_surfaces_hide_protected_values`、`tests/test_protect.py::test_policy_change_forces_recompute` |
+| TRAP-31 | 落库中途断电留下半批数据 | 数据集已更新、运行记录没写，页面指向残缺版本 | 数据集原文与运行记录单事务写入，版本号事务内分配；同批撞幂等键落回复用 | `app/store.py`、`app/modules/m6_score/runstore.py` | `tests/test_protect.py::test_interrupted_run_keeps_last_complete_version`、`tests/test_protect.py::test_identity_race_falls_back_to_replay` |
 
 ## 对账规则
 

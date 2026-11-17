@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 
-from app import config
+from app import config, protect
 from fixtures import expected
 
 
@@ -50,7 +50,9 @@ def test_profile_csv_lists_contract_columns(client_with_run):
 
 def test_duplicates_csv_lists_conflict_fields(client_with_run):
     text = get_csv(client_with_run, "duplicates.csv")
-    assert "业务键冲突,T-2026-000204,2" in text
+    token = protect.token("ticket_id", "T-2026-000204", config.MASK_PEPPER_DEFAULT)
+    assert f"业务键冲突,{token},2" in text
+    assert "T-2026-000204" not in text
     assert "satisfaction agent" in text
     assert "全行哈希" in text
 

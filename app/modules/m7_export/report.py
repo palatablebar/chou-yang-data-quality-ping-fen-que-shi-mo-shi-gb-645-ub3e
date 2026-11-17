@@ -49,6 +49,7 @@ def build(result: dict) -> dict:
         "balanced": result["reconcile"]["all_balanced"],
         "stages": result["manifest"]["stages"],
         "thresholds": result["manifest"]["thresholds"],
+        "protection": result["manifest"].get("protection"),
         "manifest": result["manifest"],
     }
 

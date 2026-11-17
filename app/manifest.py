@@ -1,7 +1,8 @@
 """运行清单：run_id、输入 sha256、规则版本、阈值、参数、耗时，可复算。
 
-输入摘要只覆盖「文件字节 + 规则版本 + 阈值常量」：三样相同必然同摘要，
-同摘要必然复用同一条运行记录。
+输入摘要只覆盖「文件名 + 文件字节 + 规则版本 + 阈值常量 + 保护政策」：
+几样相同必然同摘要，同摘要必然复用同一条运行记录；保护政策（受保护列、
+令牌算法、胡椒指纹）变了，摘要就变，同一份文件也必须重算出新版本。
 """
 from __future__ import annotations
 
@@ -9,7 +10,7 @@ import datetime as dt
 import hashlib
 import uuid
 
-from . import config
+from . import config, protect
 
 
 def new_run_id(prefix: str = "QS") -> str:
@@ -29,8 +30,9 @@ def digest_parts(parts: list[str]) -> str:
     return digest.hexdigest()
 
 
-def rules_digest(rule_version: str) -> str:
-    """阈值与权重参与摘要：改一个容忍度，摘要就变，旧结果不会被当成新结果。"""
+def rules_digest(rule_version: str, pepper: str = "") -> str:
+    """阈值、权重与保护政策都参与摘要：改一个容忍度或换胡椒，
+    摘要就变，旧结果不会被当成新结果。"""
     parts = [rule_version]
     for item in config.WEIGHTS:
         parts.append(f"{item['key']}:{item['cap']}:{item['tolerance']}")
@@ -38,14 +40,16 @@ def rules_digest(rule_version: str) -> str:
         parts.append(f"{item['grade']}:{item['floor']}")
     parts.extend([f"mad={config.MAD_SCALE}", f"iqr={config.IQR_SCALE}",
                   f"z={config.ROBUST_Z_LIMIT}", f"run={config.MISSING_RUN_MIN}"])
+    parts.extend(protect.policy_parts(pepper))
     return digest_parts(parts)
 
 
-def input_digest(name: str, data: bytes, rule_version: str) -> str:
-    return digest_parts([name, digest_bytes(data), rules_digest(rule_version)])
+def input_digest(name: str, data: bytes, rule_version: str, pepper: str = "") -> str:
+    return digest_parts([name, digest_bytes(data),
+                         rules_digest(rule_version, pepper)])
 
 
-def build(*, run_id: str, version: int, name: str, digest: str, settings,
+def build(*, run_id: str, version: int | None, name: str, digest: str, settings,
           encoding: str, declared_encoding: str | None, params: dict,
           started_at: str, finished_at: str, elapsed_ms: int,
           stages: list[dict], counters: dict, reconcile: dict,
@@ -55,12 +59,13 @@ def build(*, run_id: str, version: int, name: str, digest: str, settings,
         "version": version,
         "dataset": name,
         "rule_version": settings.rule_version,
-        "rules_digest": rules_digest(settings.rule_version),
+        "rules_digest": rules_digest(settings.rule_version, settings.mask_pepper),
         "input_digest": digest,
         "encoding": encoding,
         "declared_encoding": declared_encoding,
         "params": params,
         "thresholds": thresholds,
+        "protection": protect.policy_summary(settings.mask_pepper),
         "started_at": started_at,
         "finished_at": finished_at,
         "elapsed_ms": elapsed_ms,
